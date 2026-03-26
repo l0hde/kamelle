@@ -8,6 +8,8 @@ Think of Kamelle as your big sister at carnival 🎉 — eyes on the sky, spotti
 
 > Free models come and go. Kamelle keeps your bag stocked with the good stuff. 👜
 
+![Kamelle screenshot: top 10 free models with context, latency and score](assets/kamelle-list-top-10.png)
+
 ## What Kamelle does
 
 - 🍬 discovers free OpenRouter models live from OpenRouter
