@@ -7,6 +7,8 @@ Kamelle is a lightweight CLI for discovering, ranking, and syncing the best free
 Think of Kamelle as your big sister at carnival 🎉 — eyes on the sky, spotting the best free candy, helping you grab the good stuff before it hits the ground. Only here, the candy is free LLM tokens.
 
 > Free models come and go. Kamelle keeps your bag stocked with the good stuff. 👜
+>
+> In many setups, that means you can run OpenClaw or other local AI-agent workflows on free models **without paying for a model subscription** — as long as OpenRouter still offers free models and you already have your local tooling in place. 💫
 
 ![Kamelle screenshot: top 10 free models with context, latency and score](assets/kamelle-list-top-10.png)
 
@@ -100,6 +102,8 @@ That refreshes the Kamelle cache only — it does **not** silently switch your m
 ## Beginner guide for other AI agent setups
 
 If you're using another local AI tool, agent runtime, or automation setup, Kamelle can still be useful as a free-model scout.
+
+That also means many people can experiment with AI agents **without committing to paid model subscriptions first** — which is kind of the whole magic trick. 🍬
 
 The most useful commands are:
 
