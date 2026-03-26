@@ -47,6 +47,94 @@ If `~/.local/bin` is not on your `PATH` yet, run:
 ~/.local/bin/kamelle status
 ```
 
+## Beginner guide for OpenClaw users
+
+Kamelle works best with OpenClaw if you already have:
+
+- Python 3 installed
+- an OpenRouter API key
+- a working OpenClaw setup
+
+### 1) Make sure your OpenRouter API key is available
+
+At minimum, this works in your current shell:
+
+```bash
+export OPENROUTER_API_KEY="sk-or-v1-..."
+```
+
+If OpenClaw already has that key in its config or environment, Kamelle will pick it up automatically. 💫
+
+### 2) Install Kamelle
+
+```bash
+git clone https://github.com/l0hde/kamelle.git
+cd kamelle
+./scripts/install-local.sh
+```
+
+### 3) Check that everything works
+
+```bash
+kamelle doctor --online
+kamelle list -n 10
+```
+
+### 4) Safest first real use
+
+If you want Kamelle to improve your free-model fallbacks **without replacing your current primary model**, start here:
+
+```bash
+kamelle auto --keep-primary --dry-run
+kamelle auto --keep-primary
+```
+
+### 5) Optional: refresh the free-model catalog every hour on macOS
+
+```bash
+./scripts/install-hourly-refresh.sh
+```
+
+That refreshes the Kamelle cache only — it does **not** silently switch your main model.
+
+## Beginner guide for other AI agent setups
+
+If you're using another local AI tool, agent runtime, or automation setup, Kamelle can still be useful as a free-model scout.
+
+The most useful commands are:
+
+```bash
+kamelle doctor --online
+kamelle list -n 10 --probe-latency
+kamelle refresh
+```
+
+Even without OpenClaw integration, Kamelle can still help you:
+
+- discover free models
+- compare context windows
+- compare simple latency probes
+- keep a fresh local cache of what is currently free
+
+## Copy-paste prompt for AI agents
+
+You can give this to OpenClaw, Codex, Claude Code, or another coding agent:
+
+```text
+Install Kamelle from https://github.com/l0hde/kamelle.
+
+Steps:
+1. Clone the repository.
+2. Run ./scripts/install-local.sh
+3. Run kamelle doctor --online
+4. Run kamelle list -n 10 --probe-latency
+5. If ~/.local/bin is not on PATH, use ~/.local/bin/kamelle instead.
+6. Do not change my current primary model unless you show me a dry run first.
+7. If everything works, optionally install hourly refresh on macOS with ./scripts/install-hourly-refresh.sh
+
+At the end, summarize what you installed, where Kamelle lives, and which command I should run first.
+```
+
 ## Example commands
 
 ```bash
