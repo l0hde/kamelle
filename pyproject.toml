@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kamelle"
+version = "0.1.0"
+description = "Catch the best free OpenRouter models for OpenClaw"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "requests>=2.31.0",
+]
+authors = [
+  { name = "Mr.L. + Kaia" }
+]
+license = { text = "MIT" }
+
+[project.scripts]
+kamelle = "kamelle.cli:main"
+
+[tool.setuptools]
+packages = ["kamelle"]
