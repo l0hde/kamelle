@@ -56,7 +56,7 @@ def probe_model_latency(api_key: str, model_id: str, timeout_seconds: int = 20) 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/mr-l/kamelle",
+        "HTTP-Referer": "https://github.com/l0hde/kamelle",
         "X-Title": "Kamelle Latency Probe",
     }
     payload = {
