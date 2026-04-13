@@ -18,12 +18,12 @@ TRUSTED_PROVIDERS = [
 ]
 
 
-def score_model(model: ModelInfo, latency_entry: dict | None = None) -> float:
+def score_model(model: ModelInfo, latency_entry: dict | None = None, bench_entry: dict | None = None) -> float:
     score = 0.0
 
-    # Context window (40%)
+    # Context window (35%)
     context_score = min(model.context_length / 1_000_000, 1.0)
-    score += context_score * 0.40
+    score += context_score * 0.35
 
     # Recency (25%)
     if model.created:
@@ -49,9 +49,16 @@ def score_model(model: ModelInfo, latency_entry: dict | None = None) -> float:
     elif latency_entry and latency_entry.get("status") in ("timeout", "unavailable"):
         score -= 0.05  # small penalty for unreachable models
 
-    # Free completion bonus (10%)
+    # Free completion bonus (5%)
     if model.completion_price == 0.0:
-        score += 0.10
+        score += 0.05
+
+    # Bench quality bonus (10% max)
+    if bench_entry and bench_entry.get("status") == "ok":
+        bench_score_raw = bench_entry.get("score", 0)  # 0-2
+        score += (bench_score_raw / 2.0) * 0.10
+    elif bench_entry and bench_entry.get("status") in ("error", "timeout", "unavailable", "rate_limit"):
+        score -= 0.05  # penalty for broken models
 
     # Router penalty
     if model.is_router:
@@ -60,11 +67,16 @@ def score_model(model: ModelInfo, latency_entry: dict | None = None) -> float:
     return round(score, 6)
 
 
-def rank_models(models: list[ModelInfo], latency_map: dict | None = None) -> list[ModelInfo]:
+def rank_models(
+    models: list[ModelInfo],
+    latency_map: dict | None = None,
+    bench_map: dict | None = None,
+) -> list[ModelInfo]:
     ranked = []
     for m in models:
-        entry = latency_map.get(m.id) if latency_map else None
-        m.score = score_model(m, entry)
+        latency_entry = latency_map.get(m.id) if latency_map else None
+        bench_entry = bench_map.get(m.id) if bench_map else None
+        m.score = score_model(m, latency_entry, bench_entry)
         ranked.append(m)
     ranked.sort(key=lambda x: x.score, reverse=True)
     return ranked

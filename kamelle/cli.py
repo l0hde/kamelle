@@ -29,16 +29,23 @@ if __package__ in {None, ""}:
         rollback_config,
         save_config,
     )
-    from kamelle.openrouter import KamelleError, get_api_key, get_free_models, probe_model_latency
+    from kamelle.openrouter import KamelleError, get_api_key, get_free_models, probe_model_latency, bench_model
     from kamelle.ranking import rank_models
     from kamelle.state import (
         BACKUP_FILE,
+        BENCH_CACHE_HOURS,
         CACHE_FILE,
         DEFAULT_CACHE_HOURS,
+        HISTORY_FILE,
         LATENCY_CACHE_HOURS,
+        append_history_entry,
+        bench_entry_is_fresh,
+        get_bench_entry,
         get_latency_entry,
         latency_entry_is_fresh,
+        load_all_bench_entries,
         load_json,
+        save_bench_entry,
         save_latency_entry,
     )
 else:
@@ -55,16 +62,23 @@ else:
         rollback_config,
         save_config,
     )
-    from .openrouter import KamelleError, get_api_key, get_free_models, probe_model_latency
+    from .openrouter import KamelleError, get_api_key, get_free_models, probe_model_latency, bench_model
     from .ranking import rank_models
     from .state import (
         BACKUP_FILE,
+        BENCH_CACHE_HOURS,
         CACHE_FILE,
         DEFAULT_CACHE_HOURS,
+        HISTORY_FILE,
         LATENCY_CACHE_HOURS,
+        append_history_entry,
+        bench_entry_is_fresh,
+        get_bench_entry,
         get_latency_entry,
         latency_entry_is_fresh,
+        load_all_bench_entries,
         load_json,
+        save_bench_entry,
         save_latency_entry,
     )
 
@@ -204,13 +218,14 @@ def print_plan(before: dict, after: dict) -> None:
         print(f"  ... and {len(after_fallbacks) - 10} more")
 
 
-def maybe_apply(before: dict, after: dict, dry_run: bool) -> None:
+def maybe_apply(before: dict, after: dict, dry_run: bool, score=None) -> None:
     print_plan(before, after)
     if dry_run:
         print(f"{SPARKLES['ok']} Dry run only. No candy was moved. {SPARKLES['bag']}")
         return
     backup_config(before)
     save_config(after)
+    append_history_entry(current_primary(before), current_primary(after), score)
     print(f"{SPARKLES['ok']} Applied. Backup saved at {BACKUP_FILE}")
 
 
@@ -357,7 +372,7 @@ def cmd_auto(args):
 
     if args.keep_primary:
         after = apply_models(before, None, fallback_ids)
-        maybe_apply(before, after, args.dry_run)
+        maybe_apply(before, after, args.dry_run, score=None)
         print(f"{SPARKLES['ok']} Kamelle kept your primary untouched and restocked your fallback bag. {SPARKLES['bag']}")
         return
 
@@ -374,9 +389,10 @@ def cmd_auto(args):
         if not args.dry_run:
             backup_config(before)
             save_config(after)
+            append_history_entry(current_primary(before), current_primary(after), best.score)
         return
 
-    maybe_apply(before, after, args.dry_run)
+    maybe_apply(before, after, args.dry_run, score=best.score)
     print(f"{SPARKLES['ok']} Kamelle caught the best free candy for you. {SPARKLES['start']}")
 
 
@@ -393,7 +409,7 @@ def cmd_switch(args):
     fallback_ids = [] if args.no_fallbacks else build_fallback_ids(ranked, match.id, args.fallback_count)
     before = load_config()
     after = apply_models(before, match.id, fallback_ids)
-    maybe_apply(before, after, args.dry_run)
+    maybe_apply(before, after, args.dry_run, score=match.score)
     print(f"{SPARKLES['ok']} Switched to {match.id}")
 
 
@@ -408,7 +424,7 @@ def cmd_fallbacks(args):
     current_id = extract_openrouter_base(current)
     fallback_ids = build_fallback_ids(ranked, current_id, args.count)
     after = apply_models(before, None, fallback_ids)
-    maybe_apply(before, after, args.dry_run)
+    maybe_apply(before, after, args.dry_run, score=None)
     print(f"{SPARKLES['ok']} Kamelle rebuilt your fallback bag. {SPARKLES['bag']}")
 
 
@@ -444,7 +460,12 @@ def cmd_profile(args):
     fallback_ids = build_fallback_ids(ranked, primary_id, profile["fallback_count"])
     before = load_config()
     after = apply_models(before, primary_id, fallback_ids)
-    maybe_apply(before, after, args.dry_run)
+    maybe_apply(
+        before,
+        after,
+        args.dry_run,
+        score=best.score if profile["primary_mode"] == "best" else None,
+    )
     print(f"{SPARKLES['ok']} Profile '{profile_name}' applied — {profile['desc']}. {SPARKLES['bag']}")
 
 
@@ -479,6 +500,7 @@ def cmd_watch(args):
                     after = apply_models(before, best.id, fallback_ids)
                     backup_config(before)
                     save_config(after)
+                    append_history_entry(current, best_formatted, best.score)
                     print(f"{SPARKLES['bolt']} Rotated: {current} → {best_formatted} (score: {best.score:.3f})")
                 else:
                     print(f"{SPARKLES['ok']} Current best is still {best.id} (score: {best.score:.3f})")
@@ -493,6 +515,110 @@ def cmd_watch(args):
             time.sleep(1)
 
     raise SystemExit(0)
+
+
+def cmd_history(args):
+    entries = load_json(HISTORY_FILE, [])
+    if not entries:
+        print(f"{SPARKLES['look']} No model switches recorded yet.")
+        return
+    visible = list(reversed(entries[-args.n:]))
+    print(f"{SPARKLES['look']} Last {len(visible)} model switches\n")
+    print(f"{'#':<3} {'timestamp':<22} {'from':<40} {'to':<40} {'score':<7}")
+    print("-" * 114)
+    for i, e in enumerate(visible, 1):
+        ts = e.get('ts', '?')[:19]
+        frm = (e.get('from') or '—')[:40]
+        to = (e.get('to') or '—')[:40]
+        sc = f"{e['score']:.3f}" if e.get('score') is not None else '—'
+        print(f"{i:<3} {ts:<22} {frm:<40} {to:<40} {sc:<7}")
+
+
+
+def cmd_bench(args):
+    """Test actual response quality for the top N free models."""
+    api_key = require_api_key()
+
+    if args.force_refresh:
+        try:
+            models = rank_models(get_free_models(api_key, force_refresh=True))
+        except KamelleError as exc:
+            fail(str(exc))
+    else:
+        try:
+            models = rank_models(get_free_models(api_key))
+        except KamelleError as exc:
+            fail(str(exc))
+
+    candidates = [m for m in models if not m.is_router][: args.n]
+    if not candidates:
+        fail("No free models available to bench.")
+
+    if args.dry_run:
+        print(f"{SPARKLES['look']} Dry run — would bench {len(candidates)} models:")
+        for m in candidates:
+            print(f"  {m.id}")
+        return
+
+    print(f"{SPARKLES['start']} Benching top {len(candidates)} free models ...\n")
+
+    results: list[tuple] = []  # (model_id, entry)
+
+    def run_bench(m):
+        cached = get_bench_entry(m.id)
+        if not args.no_cache and bench_entry_is_fresh(cached, hours=BENCH_CACHE_HOURS):
+            return m.id, cached, True  # (id, entry, from_cache)
+        entry = bench_model(api_key, m.id, timeout_seconds=args.timeout)
+        save_bench_entry(m.id, entry)
+        return m.id, entry, False
+
+    with ThreadPoolExecutor(max_workers=min(args.parallel, len(candidates))) as pool:
+        futures = {pool.submit(run_bench, m): m for m in candidates}
+        completed = 0
+        for future in as_completed(futures):
+            completed += 1
+            try:
+                model_id, entry, from_cache = future.result()
+                results.append((model_id, entry, from_cache))
+                status_icon = SPARKLES['ok'] if entry['status'] == 'ok' else SPARKLES['warn']
+                cached_note = " (cached)" if from_cache else ""
+                print(f"  {status_icon} [{completed}/{len(candidates)}] {model_id}{cached_note}")
+            except Exception as exc:
+                model_id = futures[future].id
+                results.append((model_id, {"status": "error", "latency_ms": None,
+                                            "score": 0, "passes_q1": False, "passes_q2": False,
+                                            "response": None}, False))
+                print(f"  {SPARKLES['warn']} [{completed}/{len(candidates)}] {model_id}: {exc}")
+
+    # Sort by (bench score desc, latency asc)
+    results.sort(key=lambda x: (-x[1].get('score', 0),
+                                 x[1].get('latency_ms') or 99999))
+
+    if args.json:
+        out = []
+        for model_id, entry, _ in results:
+            out.append({"model": model_id, **entry})
+        print(_json.dumps(out, indent=2))
+        return
+
+    print(f"\n{SPARKLES['look']} Bench Results — top {len(results)} free models\n")
+    hdr = f"{'#':<3} {'model':<45} {'status':<12} {'latency':>8}  {'Q1':>3} {'Q2':>3} {'score':>5}"
+    print(hdr)
+    print("-" * len(hdr))
+    for i, (model_id, entry, from_cache) in enumerate(results, 1):
+        status = entry.get('status', '?')
+        lat = entry.get('latency_ms')
+        lat_s = f"{lat}ms" if lat is not None else "—"
+        q1 = "✓" if entry.get('passes_q1') else "✗"
+        q2 = "✓" if entry.get('passes_q2') else "✗"
+        sc = entry.get('score', 0)
+        cache_flag = "*" if from_cache else " "
+        short_id = model_id[:44]
+        print(f"{i:<3} {short_id:<45} {status:<12} {lat_s:>8}  {q1:>3} {q2:>3} {sc:>5}{cache_flag}")
+
+    print(f"\nQ1 = 17×4=68   Q2 = capital of Germany = Berlin")
+    full_pass = sum(1 for _, e, _ in results if e.get('score', 0) == 2)
+    print(f"{SPARKLES['ok']} {full_pass}/{len(results)} models passed both checks. * = cached result.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -551,11 +677,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_profile)
 
+    p = sub.add_parser("bench", help="Test real response quality for the top N free models")
+    p.add_argument("-n", "--n", type=int, default=5, help="Number of models to bench (default: 5)")
+    p.add_argument("-t", "--timeout", type=int, default=20, help="Per-model timeout in seconds (default: 20)")
+    p.add_argument("-p", "--parallel", type=int, default=3, help="Parallel workers (default: 3)")
+    p.add_argument("-r", "--force-refresh", action="store_true", help="Force-refresh model list before benching")
+    p.add_argument("--no-cache", action="store_true", help="Ignore cached bench results, re-bench all")
+    p.add_argument("--dry-run", action="store_true", help="Show which models would be benched, then exit")
+    p.add_argument("--json", action="store_true", help="Output results as JSON")
+    p.set_defaults(func=cmd_bench)
+
     p = sub.add_parser("watch", help="Auto-rotate to the best free model periodically")
     p.add_argument("-i", "--interval", type=int, default=30,
                     help="Check interval in minutes (default: 30)")
     p.add_argument("-c", "--fallback-count", type=int, default=5)
     p.set_defaults(func=cmd_watch)
+
+    p = sub.add_parser("history", help="Show recent model switches")
+    p.add_argument("-n", type=int, default=10)
+    p.set_defaults(func=cmd_history)
 
     return parser
 

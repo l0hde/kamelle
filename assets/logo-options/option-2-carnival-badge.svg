@@ -1,0 +1,45 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="petal" x1="256" y1="56" x2="256" y2="456" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFD95A"/>
+      <stop offset="1" stop-color="#FF8A5B"/>
+    </linearGradient>
+    <linearGradient id="core" x1="160" y1="140" x2="360" y2="360" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF77B7"/>
+      <stop offset="1" stop-color="#7B4DFF"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="120" fill="#101525"/>
+
+  <g transform="translate(256 256)">
+    <g fill="url(#petal)">
+      <path d="M0 -198C24 -168 26 -126 0 -104C-26 -126 -24 -168 0 -198Z"/>
+      <path d="M0 198C24 168 26 126 0 104C-26 126 -24 168 0 198Z"/>
+      <path d="M198 0C168 -24 126 -26 104 0C126 26 168 24 198 0Z"/>
+      <path d="M-198 0C-168 -24 -126 -26 -104 0C-126 26 -168 24 -198 0Z"/>
+      <path d="M140 -140C105 -136 76 -106 74 -72C110 -74 138 -104 140 -140Z"/>
+      <path d="M-140 -140C-105 -136 -76 -106 -74 -72C-110 -74 -138 -104 -140 -140Z"/>
+      <path d="M140 140C105 136 76 106 74 72C110 74 138 104 140 140Z"/>
+      <path d="M-140 140C-105 136 -76 106 -74 72C-110 74 -138 104 -140 140Z"/>
+    </g>
+
+    <circle r="130" fill="url(#core)"/>
+    <circle r="102" fill="#181F34" fill-opacity="0.5"/>
+
+    <path d="M-108 -12L-68 -52L-54 44L-108 -12Z" fill="#FFD8F0"/>
+    <path d="M108 -12L68 -52L54 44L108 -12Z" fill="#FFD8F0"/>
+    <rect x="-64" y="-72" width="128" height="120" rx="56" fill="#FFE17A"/>
+    <path d="M-18 -10H18" stroke="#A12E6D" stroke-width="14" stroke-linecap="round"/>
+    <circle cx="0" cy="-42" r="18" fill="#7B4DFF"/>
+    <path d="M0 -74V-108" stroke="#7B4DFF" stroke-width="12" stroke-linecap="round"/>
+    <circle cx="0" cy="-118" r="10" fill="#80F0FF"/>
+    <path d="M0 -24V22" stroke="#A12E6D" stroke-width="12" stroke-linecap="round"/>
+    <path d="M-24 22H24" stroke="#A12E6D" stroke-width="12" stroke-linecap="round"/>
+  </g>
+
+  <circle cx="90" cy="100" r="10" fill="#80F0FF"/>
+  <circle cx="418" cy="98" r="8" fill="#FF77B7"/>
+  <circle cx="404" cy="404" r="9" fill="#FFD95A"/>
+  <circle cx="108" cy="408" r="8" fill="#80F0FF"/>
+</svg>

@@ -73,6 +73,90 @@ def fetch_models(api_key: str) -> list[dict]:
     return data.get("data", [])
 
 
+BENCH_PROMPT = (
+    "Answer these two tasks in order:\n"
+    "1. What is 17 times 4? Give only the number.\n"
+    "2. Name the capital of Germany in one word."
+)
+BENCH_EXPECTED_Q1 = "68"
+BENCH_EXPECTED_Q2 = "berlin"
+
+
+def bench_model(
+    api_key: str,
+    model_id: str,
+    timeout_seconds: int = 20,
+) -> dict:
+    """Send a standardised quality prompt and return a bench result dict.
+
+    Returns a dict with keys:
+        status: "ok" | "error" | "timeout" | "rate_limit" | "unavailable" | "empty"
+        latency_ms: int | None
+        response: str | None  (raw model text, truncated to 400 chars)
+        passes_q1: bool  (response contains '68')
+        passes_q2: bool  (response lowercased contains 'berlin')
+        score: int  (0-2)
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/l0hde/kamelle",
+        "X-Title": "Kamelle Bench",
+    }
+    payload = {
+        "model": model_id,
+        "messages": [{"role": "user", "content": BENCH_PROMPT}],
+        "max_tokens": 60,
+        "stream": False,
+    }
+    started = time.perf_counter()
+    try:
+        resp = _retry_request(
+            requests.post, OPENROUTER_CHAT_URL,
+            max_retries=1,
+            headers=headers, json=payload, timeout=timeout_seconds,
+        )
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+        if resp.status_code == 429:
+            return {"status": "rate_limit", "latency_ms": None, "response": None,
+                    "passes_q1": False, "passes_q2": False, "score": 0}
+        if resp.status_code == 503:
+            return {"status": "unavailable", "latency_ms": None, "response": None,
+                    "passes_q1": False, "passes_q2": False, "score": 0}
+        if resp.status_code != 200:
+            return {"status": f"http_{resp.status_code}", "latency_ms": elapsed_ms, "response": None,
+                    "passes_q1": False, "passes_q2": False, "score": 0}
+
+        try:
+            data = resp.json()
+            text = data["choices"][0]["message"]["content"] or ""
+        except (KeyError, IndexError, ValueError):
+            return {"status": "empty", "latency_ms": elapsed_ms, "response": None,
+                    "passes_q1": False, "passes_q2": False, "score": 0}
+
+        if not text.strip():
+            return {"status": "empty", "latency_ms": elapsed_ms, "response": "",
+                    "passes_q1": False, "passes_q2": False, "score": 0}
+
+        passes_q1 = BENCH_EXPECTED_Q1 in text
+        passes_q2 = BENCH_EXPECTED_Q2 in text.lower()
+        return {
+            "status": "ok",
+            "latency_ms": elapsed_ms,
+            "response": text[:400],
+            "passes_q1": passes_q1,
+            "passes_q2": passes_q2,
+            "score": int(passes_q1) + int(passes_q2),
+        }
+    except requests.Timeout:
+        return {"status": "timeout", "latency_ms": None, "response": None,
+                "passes_q1": False, "passes_q2": False, "score": 0}
+    except requests.RequestException:
+        return {"status": "error", "latency_ms": None, "response": None,
+                "passes_q1": False, "passes_q2": False, "score": 0}
+
+
 def probe_model_latency(api_key: str, model_id: str, timeout_seconds: int = 20) -> tuple[str, int | None]:
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -139,6 +223,28 @@ def is_free_model(model: ModelInfo) -> bool:
     return False
 
 
+_NON_CHAT_MODALITIES = {"audio->audio", "text->audio", "audio->text",
+                        "text->image", "image->text", "image->image"}
+
+
+def is_chat_model(model: ModelInfo) -> bool:
+    """Return True if the model supports text-in / text-out chat completions."""
+    arch = model.raw.get("architecture") or {}
+    modality: str | None = arch.get("modality") or arch.get("input_modalities") or None
+    if modality:
+        # OpenRouter uses e.g. "text->text", "text+image->text", "text->audio"
+        if modality in _NON_CHAT_MODALITIES:
+            return False
+        if "text" not in modality:
+            return False
+    # Also filter by known non-chat ID patterns
+    _id = model.id.lower()
+    if any(p in _id for p in ("/lyria", "/dall-e", "/stable-diffusion",
+                               "/midjourney", "/suno", "/audio")):
+        return False
+    return True
+
+
 def get_free_models(api_key: str, force_refresh: bool = False) -> list[ModelInfo]:
     if not force_refresh:
         cache = load_json(CACHE_FILE, {})
@@ -147,7 +253,7 @@ def get_free_models(api_key: str, force_refresh: bool = False) -> list[ModelInfo
 
     models = fetch_models(api_key)
     free_models = [normalize_model(m) for m in models]
-    free_models = [m for m in free_models if is_free_model(m)]
+    free_models = [m for m in free_models if is_free_model(m) and is_chat_model(m)]
 
     save_json(
         CACHE_FILE,
