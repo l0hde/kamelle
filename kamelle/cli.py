@@ -16,27 +16,24 @@ warnings.filterwarnings(
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from kamelle.config import (
-        OPENCLAW_CONFIG_PATH,
-        apply_models,
-        backup_config,
-        current_fallbacks,
-        current_primary,
-        extract_openrouter_base,
-        format_for_list,
-        format_for_primary,
-        load_config,
-        rollback_config,
-        save_config,
+    from kamelle.adapters import (
+        DEFAULT_ADAPTER,
+        AdapterError,
+        AgentState,
+        ModelPlan,
+        adapter_names,
+        detect_installed,
+        get_adapter,
+        same_model,
     )
     from kamelle.openrouter import KamelleError, get_api_key, get_free_models, probe_model_latency, bench_model
     from kamelle.ranking import rank_models
     from kamelle.state import (
-        BACKUP_FILE,
         BENCH_CACHE_HOURS,
         CACHE_FILE,
         DEFAULT_CACHE_HOURS,
         HISTORY_FILE,
+        KAMELLE_DIR,
         LATENCY_CACHE_HOURS,
         append_history_entry,
         bench_entry_is_fresh,
@@ -49,27 +46,24 @@ if __package__ in {None, ""}:
         save_latency_entry,
     )
 else:
-    from .config import (
-        OPENCLAW_CONFIG_PATH,
-        apply_models,
-        backup_config,
-        current_fallbacks,
-        current_primary,
-        extract_openrouter_base,
-        format_for_list,
-        format_for_primary,
-        load_config,
-        rollback_config,
-        save_config,
+    from .adapters import (
+        DEFAULT_ADAPTER,
+        AdapterError,
+        AgentState,
+        ModelPlan,
+        adapter_names,
+        detect_installed,
+        get_adapter,
+        same_model,
     )
     from .openrouter import KamelleError, get_api_key, get_free_models, probe_model_latency, bench_model
     from .ranking import rank_models
     from .state import (
-        BACKUP_FILE,
         BENCH_CACHE_HOURS,
         CACHE_FILE,
         DEFAULT_CACHE_HOURS,
         HISTORY_FILE,
+        KAMELLE_DIR,
         LATENCY_CACHE_HOURS,
         append_history_entry,
         bench_entry_is_fresh,
@@ -106,10 +100,27 @@ def fail(message: str, code: int = 1) -> None:
     raise SystemExit(code)
 
 
-def require_api_key() -> str:
-    api_key = get_api_key()
+def say(adapter, message: str) -> None:
+    """Print a status line, keeping stdout clean for adapters that write to it."""
+    print(message, file=sys.stderr if adapter.writes_to_stdout else sys.stdout)
+
+
+def build_adapter(args):
+    """The agent backend this invocation targets (see `kamelle agents`)."""
+    try:
+        return get_adapter(
+            getattr(args, "agent", None),
+            getattr(args, "agent_config", None),
+            getattr(args, "agent_option", None),
+        )
+    except AdapterError as exc:
+        fail(str(exc))
+
+
+def require_api_key(adapter=None) -> str:
+    api_key = get_api_key(adapter)
     if not api_key:
-        fail("Kamelle couldn't find OPENROUTER_API_KEY. Set it in your environment or OpenClaw config first.")
+        fail("Kamelle couldn't find OPENROUTER_API_KEY. Set it in your environment or your agent's config first.")
     return api_key
 
 
@@ -191,55 +202,64 @@ def build_fallback_ids(ranked_models, primary_id: str | None, count: int) -> lis
     return fallback_ids
 
 
-def model_status_tag(model_id: str, primary: str | None, fallbacks: list[str]) -> str:
-    if primary == format_for_primary(model_id):
-        return "PRIMARY"
-    if format_for_list(model_id) in set(fallbacks):
-        return "FALLBACK"
-    return ""
+def print_plan(adapter, before: AgentState, after: AgentState, stream=sys.stdout) -> None:
+    print(f"{SPARKLES['look']} Kamelle's plan for {adapter.display_name}", file=stream)
+    print("-" * 56, file=stream)
+    print(f"Config:    {adapter.location()}", file=stream)
+    print(f"Primary:   {before.primary or 'not set'}", file=stream)
+    print(f"        -> {after.primary or 'not set'}", file=stream)
+    print(f"Fallbacks: {len(before.fallbacks)}", file=stream)
+    for fb in before.fallbacks[:10]:
+        print(f"  - {fb}", file=stream)
+    print("      ->", file=stream)
+    for fb in after.fallbacks[:10]:
+        print(f"  - {fb}", file=stream)
+    if len(after.fallbacks) > 10:
+        print(f"  ... and {len(after.fallbacks) - 10} more", file=stream)
 
 
-def print_plan(before: dict, after: dict) -> None:
-    before_primary = current_primary(before)
-    after_primary = current_primary(after)
-    before_fallbacks = current_fallbacks(before)
-    after_fallbacks = current_fallbacks(after)
-    print(f"{SPARKLES['look']} Kamelle's plan")
-    print("-" * 56)
-    print(f"Primary:   {before_primary or 'not set'}")
-    print(f"        -> {after_primary or 'not set'}")
-    print(f"Fallbacks: {len(before_fallbacks)}")
-    for fb in before_fallbacks[:10]:
-        print(f"  - {fb}")
-    print("      ->")
-    for fb in after_fallbacks[:10]:
-        print(f"  - {fb}")
-    if len(after_fallbacks) > 10:
-        print(f"  ... and {len(after_fallbacks) - 10} more")
+def maybe_apply(adapter, before, plan: ModelPlan, dry_run: bool, score=None, quiet: bool = False):
+    """Show the plan, then hand it to the adapter. Returns the resulting state."""
+    try:
+        after = adapter.apply(before, plan)
+    except AdapterError as exc:
+        fail(str(exc))
 
+    before_state = adapter.describe(before)
+    after_state = adapter.describe(after)
+    # An adapter that prints its result owns stdout; our chatter goes to stderr.
+    stream = sys.stderr if adapter.writes_to_stdout else sys.stdout
 
-def maybe_apply(before: dict, after: dict, dry_run: bool, score=None) -> None:
-    print_plan(before, after)
+    if not quiet:
+        print_plan(adapter, before_state, after_state, stream)
+        note = adapter.note_for(plan)
+        if note:
+            print(f"{SPARKLES['warn']} {note}", file=stream)
+
     if dry_run:
-        print(f"{SPARKLES['ok']} Dry run only. No candy was moved. {SPARKLES['bag']}")
-        return
-    backup_config(before)
-    save_config(after)
-    append_history_entry(current_primary(before), current_primary(after), score)
-    print(f"{SPARKLES['ok']} Applied. Backup saved at {BACKUP_FILE}")
+        if not quiet:
+            print(f"{SPARKLES['ok']} Dry run only. No candy was moved. {SPARKLES['bag']}", file=stream)
+        return after_state
+
+    backup = adapter.backup(before)
+    adapter.save(after)
+    append_history_entry(before_state.primary, after_state.primary, score, agent=adapter.name)
+    if not quiet:
+        where = f" Backup saved at {backup}" if backup else ""
+        print(f"{SPARKLES['ok']} Applied.{where}", file=stream)
+    return after_state
 
 
 def cmd_list(args):
-    api_key = require_api_key()
+    adapter = build_adapter(args)
+    api_key = require_api_key(adapter)
     try:
         models = get_free_models(api_key, force_refresh=args.refresh)
     except KamelleError as exc:
         fail(str(exc))
 
     limit = args.limit
-    config = load_config()
-    primary = current_primary(config)
-    fallbacks = current_fallbacks(config)
+    state = adapter.describe(adapter.load())
 
     # Probe latencies first (parallel), then rank with latency data
     visible_for_probe = models[:limit]
@@ -258,7 +278,7 @@ def cmd_list(args):
                 "score": round(m.score, 3),
                 "latency_ms": entry.get("latency_ms") if entry else None,
                 "latency_status": entry.get("status") if entry else None,
-                "status": model_status_tag(m.id, primary, fallbacks) or None,
+                "status": adapter.status_tag(state, m.id) or None,
             })
         print(_json.dumps(output, indent=2))
         return
@@ -269,7 +289,7 @@ def cmd_list(args):
     print(f"{'#':<3} {'model':<54} {'ctx':<8} {'latency':<10} {'score':<7} {'status':<10}")
     print("-" * 112)
     for i, m in enumerate(visible, 1):
-        tag = model_status_tag(m.id, primary, fallbacks)
+        tag = adapter.status_tag(state, m.id)
         latency = format_latency_label(latency_map.get(m.id))
         print(f"{i:<3} {m.id[:54]:<54} {format_context(m.context_length):<8} {latency:<10} {m.score:<7.3f} {tag:<10}")
     print("-" * 112)
@@ -290,16 +310,19 @@ def cmd_refresh(args):
 
 
 def cmd_status(args):
-    config = load_config()
+    adapter = build_adapter(args)
+    snapshot = adapter.load()
+    native = adapter.native(snapshot)
     cache = load_json(CACHE_FILE, {})
-    primary = current_primary(config)
-    fallbacks = current_fallbacks(config)
-    api_key = get_api_key()
+    api_key = get_api_key(adapter)
+    primary = native.get("primary")
+    fallbacks = native.get("fallbacks") or []
 
     if getattr(args, "json", False):
         output = {
             "api_key_present": bool(api_key),
-            "config_path": str(OPENCLAW_CONFIG_PATH),
+            "agent": adapter.name,
+            "config_path": adapter.location(),
             "primary": primary,
             "fallbacks": fallbacks,
             "cache_path": str(CACHE_FILE),
@@ -313,13 +336,14 @@ def cmd_status(args):
     print(f"{SPARKLES['heart']} Kamelle status")
     print("-" * 48)
     print(f"API key:   {'present' if api_key else 'missing'}")
-    print(f"Config:    {OPENCLAW_CONFIG_PATH}")
+    print(f"Agent:     {adapter.display_name}")
+    print(f"Config:    {adapter.location()}")
     print(f"Primary:   {primary or 'not set'}")
     print(f"Fallbacks: {len(fallbacks)}")
     for fb in fallbacks[:10]:
         print(f"  - {fb}")
     print(f"Cache:     {CACHE_FILE}")
-    print(f"Backup:    {BACKUP_FILE}")
+    print(f"Backup:    {adapter.backup_path()}")
     print(f"TTL:       {DEFAULT_CACHE_HOURS} hour")
     if cache.get('cached_at'):
         print(f"Cached at: {cache['cached_at']}")
@@ -327,22 +351,33 @@ def cmd_status(args):
 
 
 def cmd_doctor(args):
+    adapter = build_adapter(args)
+    backup_path = adapter.backup_path()
     print(f"{SPARKLES['tools']} Kamelle doctor")
     print("-" * 48)
-    api_key = get_api_key()
+    api_key = get_api_key(adapter)
     print(f"API key present:     {'yes' if api_key else 'no'}")
-    print(f"OpenClaw config:     {'yes' if OPENCLAW_CONFIG_PATH.exists() else 'no'} ({OPENCLAW_CONFIG_PATH})")
+    print(f"Agent:               {adapter.display_name} ({adapter.name})")
+    print(f"Agent config:        {'yes' if adapter.is_installed() else 'no'} ({adapter.location()})")
     print(f"Cache file present:  {'yes' if CACHE_FILE.exists() else 'no'} ({CACHE_FILE})")
-    print(f"Backup file present: {'yes' if BACKUP_FILE.exists() else 'no'} ({BACKUP_FILE})")
+    print(f"Backup file present: {'yes' if backup_path.exists() else 'no'} ({backup_path})")
 
-    try:
-        OPENCLAW_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        probe = OPENCLAW_CONFIG_PATH.parent / '.kamelle-write-probe'
-        probe.write_text('ok')
-        probe.unlink()
-        print("Config dir writable: yes")
-    except Exception as exc:
-        print(f"Config dir writable: no ({exc})")
+    for label, directory in (("Kamelle dir", KAMELLE_DIR), ("Config dir", adapter.config_path.parent if adapter.config_path else None)):
+        if directory is None:
+            print(f"{label + ' writable:':<21}n/a (this agent writes to stdout)")
+            continue
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            probe = directory / '.kamelle-write-probe'
+            probe.write_text('ok')
+            probe.unlink()
+            print(f"{label + ' writable:':<21}yes")
+        except Exception as exc:
+            print(f"{label + ' writable:':<21}no ({exc})")
+
+    installed = detect_installed()
+    if installed:
+        print(f"Agents detected:     {', '.join(a.display_name for a in installed)}")
 
     if args.online:
         if not api_key:
@@ -358,7 +393,8 @@ def cmd_doctor(args):
 
 
 def cmd_auto(args):
-    api_key = require_api_key()
+    adapter = build_adapter(args)
+    api_key = require_api_key(adapter)
     try:
         ranked = rank_models(get_free_models(api_key, force_refresh=args.refresh))
     except KamelleError as exc:
@@ -367,37 +403,39 @@ def cmd_auto(args):
         fail("No free models found.")
 
     best = next((m for m in ranked if not m.is_router), ranked[0])
-    fallback_ids = build_fallback_ids(ranked, None if args.keep_primary else best.id, args.fallback_count)
-    before = load_config()
+    plan = ModelPlan(
+        primary=None if args.keep_primary else best.id,
+        fallbacks=build_fallback_ids(ranked, None if args.keep_primary else best.id, args.fallback_count),
+    )
+    before = adapter.load()
 
     if args.keep_primary:
-        after = apply_models(before, None, fallback_ids)
-        maybe_apply(before, after, args.dry_run, score=None)
-        print(f"{SPARKLES['ok']} Kamelle kept your primary untouched and restocked your fallback bag. {SPARKLES['bag']}")
+        maybe_apply(adapter, before, plan, args.dry_run, score=None)
+        say(adapter, f"{SPARKLES['ok']} Kamelle kept your primary untouched and restocked your fallback bag. {SPARKLES['bag']}")
         return
 
-    after = apply_models(before, best.id, fallback_ids)
-
     if getattr(args, "json", False):
+        after = adapter.apply(before, plan)
+        native = adapter.native(after)
         print(_json.dumps({
-            "primary": current_primary(after),
-            "fallbacks": current_fallbacks(after),
+            "agent": adapter.name,
+            "primary": native.get("primary"),
+            "fallbacks": native.get("fallbacks"),
             "best_model": best.id,
             "best_score": round(best.score, 3),
             "dry_run": args.dry_run,
         }, indent=2))
         if not args.dry_run:
-            backup_config(before)
-            save_config(after)
-            append_history_entry(current_primary(before), current_primary(after), best.score)
+            maybe_apply(adapter, before, plan, dry_run=False, score=best.score, quiet=True)
         return
 
-    maybe_apply(before, after, args.dry_run, score=best.score)
-    print(f"{SPARKLES['ok']} Kamelle caught the best free candy for you. {SPARKLES['start']}")
+    maybe_apply(adapter, before, plan, args.dry_run, score=best.score)
+    say(adapter, f"{SPARKLES['ok']} Kamelle caught the best free candy for you. {SPARKLES['start']}")
 
 
 def cmd_switch(args):
-    api_key = require_api_key()
+    adapter = build_adapter(args)
+    api_key = require_api_key(adapter)
     try:
         ranked = rank_models(get_free_models(api_key, force_refresh=args.refresh))
     except KamelleError as exc:
@@ -406,33 +444,63 @@ def cmd_switch(args):
     if not match:
         fail("Kamelle couldn't find that model in the free candy pile.")
 
-    fallback_ids = [] if args.no_fallbacks else build_fallback_ids(ranked, match.id, args.fallback_count)
-    before = load_config()
-    after = apply_models(before, match.id, fallback_ids)
-    maybe_apply(before, after, args.dry_run, score=match.score)
-    print(f"{SPARKLES['ok']} Switched to {match.id}")
+    plan = ModelPlan(
+        primary=match.id,
+        fallbacks=[] if args.no_fallbacks else build_fallback_ids(ranked, match.id, args.fallback_count),
+    )
+    maybe_apply(adapter, adapter.load(), plan, args.dry_run, score=match.score)
+    say(adapter, f"{SPARKLES['ok']} Switched to {match.id}")
 
 
 def cmd_fallbacks(args):
-    api_key = require_api_key()
+    adapter = build_adapter(args)
+    api_key = require_api_key(adapter)
     try:
         ranked = rank_models(get_free_models(api_key, force_refresh=args.refresh))
     except KamelleError as exc:
         fail(str(exc))
-    before = load_config()
-    current = current_primary(before)
-    current_id = extract_openrouter_base(current)
-    fallback_ids = build_fallback_ids(ranked, current_id, args.count)
-    after = apply_models(before, None, fallback_ids)
-    maybe_apply(before, after, args.dry_run, score=None)
-    print(f"{SPARKLES['ok']} Kamelle rebuilt your fallback bag. {SPARKLES['bag']}")
+    before = adapter.load()
+    current_id = adapter.describe(before).primary
+    plan = ModelPlan(primary=None, fallbacks=build_fallback_ids(ranked, current_id, args.count))
+    maybe_apply(adapter, before, plan, args.dry_run, score=None)
+    say(adapter, f"{SPARKLES['ok']} Kamelle rebuilt your fallback bag. {SPARKLES['bag']}")
 
 
 def cmd_rollback(args):
-    if rollback_config():
-        print(f"{SPARKLES['ok']} Rolled back to the last config snapshot. Sweet rescue. {SPARKLES['heart']}")
+    adapter = build_adapter(args)
+    if adapter.restore():
+        print(f"{SPARKLES['ok']} Rolled back {adapter.display_name} to the last config snapshot. "
+              f"Sweet rescue. {SPARKLES['heart']}")
     else:
-        fail("No backup found yet.")
+        fail(f"No backup found yet for {adapter.display_name} ({adapter.backup_path()}).")
+
+
+def cmd_agents(args):
+    active = build_adapter(args)
+    if getattr(args, "json", False):
+        print(_json.dumps([
+            {
+                "name": adapter.name,
+                "display_name": adapter.display_name,
+                "config_path": adapter.location(),
+                "installed": adapter.is_installed(),
+                "active": adapter.name == active.name,
+            }
+            for adapter in (get_adapter(name) for name in adapter_names())
+        ], indent=2))
+        return
+
+    print(f"{SPARKLES['tools']} Agents Kamelle can stock")
+    print("-" * 86)
+    print(f"{'':<2} {'name':<10} {'found':<7} {'writes':<52}")
+    print("-" * 86)
+    for name in adapter_names():
+        adapter = get_adapter(name)
+        marker = "→" if name == active.name else " "
+        found = "yes" if adapter.is_installed() else "no"
+        print(f"{marker:<2} {name:<10} {found:<7} {adapter.summary[:52]:<52}")
+    print("-" * 86)
+    print(f"Pick one with --agent NAME, or set KAMELLE_AGENT. Default: {DEFAULT_ADAPTER}.")
 
 
 def cmd_profile(args):
@@ -440,7 +508,8 @@ def cmd_profile(args):
     if profile_name not in PROFILES:
         fail(f"Unknown profile '{profile_name}'. Choose: {', '.join(PROFILES.keys())}")
 
-    api_key = require_api_key()
+    adapter = build_adapter(args)
+    api_key = require_api_key(adapter)
     profile = PROFILES[profile_name]
 
     try:
@@ -457,22 +526,26 @@ def cmd_profile(args):
     else:
         primary_id = "openrouter/free"
 
-    fallback_ids = build_fallback_ids(ranked, primary_id, profile["fallback_count"])
-    before = load_config()
-    after = apply_models(before, primary_id, fallback_ids)
+    plan = ModelPlan(
+        primary=primary_id,
+        fallbacks=build_fallback_ids(ranked, primary_id, profile["fallback_count"]),
+    )
     maybe_apply(
-        before,
-        after,
+        adapter,
+        adapter.load(),
+        plan,
         args.dry_run,
         score=best.score if profile["primary_mode"] == "best" else None,
     )
-    print(f"{SPARKLES['ok']} Profile '{profile_name}' applied — {profile['desc']}. {SPARKLES['bag']}")
+    say(adapter, f"{SPARKLES['ok']} Profile '{profile_name}' applied — {profile['desc']}. {SPARKLES['bag']}")
 
 
 def cmd_watch(args):
-    api_key = require_api_key()
+    adapter = build_adapter(args)
+    api_key = require_api_key(adapter)
     interval = args.interval * 60
-    print(f"{SPARKLES['look']} Kamelle watch mode — checking every {args.interval} min. Ctrl+C to stop.")
+    print(f"{SPARKLES['look']} Kamelle watch mode for {adapter.display_name} "
+          f"— checking every {args.interval} min. Ctrl+C to stop.")
 
     running = True
 
@@ -490,18 +563,17 @@ def cmd_watch(args):
                 print(f"{SPARKLES['warn']} No free models found. Waiting...")
             else:
                 best = next((m for m in ranked if not m.is_router), ranked[0])
-                config = load_config()
-                current = current_primary(config)
-                best_formatted = format_for_primary(best.id)
+                before = adapter.load()
+                current = adapter.describe(before).primary
 
-                if current != best_formatted:
-                    fallback_ids = build_fallback_ids(ranked, best.id, args.fallback_count)
-                    before = config
-                    after = apply_models(before, best.id, fallback_ids)
-                    backup_config(before)
-                    save_config(after)
-                    append_history_entry(current, best_formatted, best.score)
-                    print(f"{SPARKLES['bolt']} Rotated: {current} → {best_formatted} (score: {best.score:.3f})")
+                if not same_model(current, best.id):
+                    plan = ModelPlan(
+                        primary=best.id,
+                        fallbacks=build_fallback_ids(ranked, best.id, args.fallback_count),
+                    )
+                    maybe_apply(adapter, before, plan, dry_run=False, score=best.score, quiet=True)
+                    print(f"{SPARKLES['bolt']} Rotated: {current or 'not set'} → {best.id} "
+                          f"(score: {best.score:.3f})")
                 else:
                     print(f"{SPARKLES['ok']} Current best is still {best.id} (score: {best.score:.3f})")
         except KamelleError as exc:
@@ -524,14 +596,16 @@ def cmd_history(args):
         return
     visible = list(reversed(entries[-args.n:]))
     print(f"{SPARKLES['look']} Last {len(visible)} model switches\n")
-    print(f"{'#':<3} {'timestamp':<22} {'from':<40} {'to':<40} {'score':<7}")
-    print("-" * 114)
+    print(f"{'#':<3} {'timestamp':<22} {'agent':<10} {'from':<36} {'to':<36} {'score':<7}")
+    print("-" * 118)
     for i, e in enumerate(visible, 1):
         ts = e.get('ts', '?')[:19]
-        frm = (e.get('from') or '—')[:40]
-        to = (e.get('to') or '—')[:40]
+        # Entries written before Kamelle spoke to more than one agent have no agent.
+        agent = (e.get('agent') or '—')[:10]
+        frm = (e.get('from') or '—')[:36]
+        to = (e.get('to') or '—')[:36]
         sc = f"{e['score']:.3f}" if e.get('score') is not None else '—'
-        print(f"{i:<3} {ts:<22} {frm:<40} {to:<40} {sc:<7}")
+        print(f"{i:<3} {ts:<22} {agent:<10} {frm:<36} {to:<36} {sc:<7}")
 
 
 
@@ -621,14 +695,38 @@ def cmd_bench(args):
     print(f"{SPARKLES['ok']} {full_pass}/{len(results)} models passed both checks. * = cached result.")
 
 
+def agent_flags() -> argparse.ArgumentParser:
+    """Flags shared by every command that reads or writes an agent's config."""
+    parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument(
+        "-a", "--agent", default=None, choices=adapter_names(),
+        help=f"Agent to stock (default: $KAMELLE_AGENT, else {DEFAULT_ADAPTER})",
+    )
+    parent.add_argument(
+        "--agent-config", default=None, metavar="PATH",
+        help="Use this config file instead of the agent's default location",
+    )
+    parent.add_argument(
+        "-o", "--agent-option", action="append", default=None, metavar="KEY=VALUE",
+        help="Adapter-specific option, repeatable (e.g. -o out=models.yaml)",
+    )
+    return parent
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kamelle",
-        description="Kamelle helps you catch the best free OpenRouter models for OpenClaw.",
+        description="Kamelle helps you catch the best free OpenRouter models "
+                    "for OpenClaw, Hermes and other AI agents.",
     )
     sub = parser.add_subparsers(dest="command")
+    agent = agent_flags()
 
-    p = sub.add_parser("list", help="List ranked free models")
+    p = sub.add_parser("agents", parents=[agent], help="List the agent backends Kamelle can write to")
+    p.add_argument("--json", action="store_true", help="Output as JSON")
+    p.set_defaults(func=cmd_agents)
+
+    p = sub.add_parser("list", parents=[agent], help="List ranked free models")
     p.add_argument("-n", "--limit", type=int, default=15)
     p.add_argument("-r", "--refresh", action="store_true")
     p.add_argument("--probe-latency", action="store_true", help="Refresh latency numbers live for the listed models")
@@ -638,15 +736,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("refresh", help="Refresh the cached free model catalog")
     p.set_defaults(func=cmd_refresh)
 
-    p = sub.add_parser("status", help="Show current Kamelle/OpenClaw model status")
+    p = sub.add_parser("status", parents=[agent], help="Show the agent's current model selection")
     p.add_argument("--json", action="store_true", help="Output as JSON")
     p.set_defaults(func=cmd_status)
 
-    p = sub.add_parser("doctor", help="Check if Kamelle is ready to run")
+    p = sub.add_parser("doctor", parents=[agent], help="Check if Kamelle is ready to run")
     p.add_argument("--online", action="store_true", help="Also test a live OpenRouter fetch")
     p.set_defaults(func=cmd_doctor)
 
-    p = sub.add_parser("auto", help="Pick the best free model and set fallbacks")
+    p = sub.add_parser("auto", parents=[agent], help="Pick the best free model and set fallbacks")
     p.add_argument("-r", "--refresh", action="store_true")
     p.add_argument("-c", "--fallback-count", type=int, default=5)
     p.add_argument("--keep-primary", action="store_true")
@@ -654,7 +752,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="Output as JSON")
     p.set_defaults(func=cmd_auto)
 
-    p = sub.add_parser("switch", help="Switch to a specific free model")
+    p = sub.add_parser("switch", parents=[agent], help="Switch to a specific free model")
     p.add_argument("model")
     p.add_argument("-r", "--refresh", action="store_true")
     p.add_argument("-c", "--fallback-count", type=int, default=5)
@@ -662,16 +760,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_switch)
 
-    p = sub.add_parser("fallbacks", help="Rebuild fallback models")
+    p = sub.add_parser("fallbacks", parents=[agent], help="Rebuild fallback models")
     p.add_argument("-r", "--refresh", action="store_true")
     p.add_argument("-c", "--count", type=int, default=5)
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_fallbacks)
 
-    p = sub.add_parser("rollback", help="Restore the last saved config backup")
+    p = sub.add_parser("rollback", parents=[agent], help="Restore the last saved config backup")
     p.set_defaults(func=cmd_rollback)
 
-    p = sub.add_parser("profile", help="Apply a preset profile (ultra/stabil/echo)")
+    p = sub.add_parser("profile", parents=[agent], help="Apply a preset profile (ultra/stabil/echo)")
     p.add_argument("name", choices=["ultra", "stabil", "echo"],
                     help="ultra=best quality, stabil=stable routing, echo=minimal")
     p.add_argument("--dry-run", action="store_true")
@@ -687,7 +785,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="Output results as JSON")
     p.set_defaults(func=cmd_bench)
 
-    p = sub.add_parser("watch", help="Auto-rotate to the best free model periodically")
+    p = sub.add_parser("watch", parents=[agent], help="Auto-rotate to the best free model periodically")
     p.add_argument("-i", "--interval", type=int, default=30,
                     help="Check interval in minutes (default: 30)")
     p.add_argument("-c", "--fallback-count", type=int, default=5)
