@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 
 from .base import AdapterError, AgentAdapter, AgentState, ModelPlan, same_model
+from .hermes import HermesAdapter
 from .openclaw import OpenClawAdapter
 
 __all__ = [
@@ -28,7 +29,7 @@ __all__ = [
 ]
 
 ADAPTERS: dict[str, type[AgentAdapter]] = {
-    cls.name: cls for cls in (OpenClawAdapter,)
+    cls.name: cls for cls in (OpenClawAdapter, HermesAdapter)
 }
 
 #: OpenClaw stays the default so existing scripts and cron jobs keep working.
