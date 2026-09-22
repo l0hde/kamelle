@@ -20,10 +20,20 @@ class KamelleError(RuntimeError):
     pass
 
 
-def get_api_key() -> str | None:
+def get_api_key(adapter=None) -> str | None:
+    """Find an OpenRouter key: the environment first, then the agent's own config.
+
+    ``adapter`` is an optional :class:`~kamelle.adapters.base.AgentAdapter`; when
+    given, its credential file is consulted before falling back to OpenClaw's.
+    """
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if api_key:
         return api_key
+
+    if adapter is not None:
+        api_key = adapter.api_key()
+        if api_key:
+            return api_key
 
     if OPENCLAW_CONFIG_PATH.exists():
         try:
